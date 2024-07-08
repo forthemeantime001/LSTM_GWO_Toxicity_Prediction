@@ -1,0 +1,380 @@
+# Library
+
+## Install Library NiaPy
+
+!pip install niapy
+
+## Import Default Library
+
+import os
+import random
+import joblib
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
+from keras.optimizers import Adam, SGD, RMSprop
+from keras.models import save_model, load_model
+from keras.models import Sequential
+from keras.utils import to_categorical
+from keras.callbacks import EarlyStopping
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import RandomOverSampler
+from keras.layers import LSTM, Dense, Embedding, Activation, Dropout, Flatten, BatchNormalization, InputLayer
+
+from niapy.task import Task, OptimizationType
+from niapy.problems import Problem
+from niapy.algorithms.basic import GreyWolfOptimizer
+
+import time
+
+# Import Dataset
+
+# Import and Read Dataset
+url = 'https://raw.githubusercontent.com/forthemeantime001/datasetTA/main/dataset_nr_ar.csv'
+df = pd.read_csv(url)
+
+# View all contents of the dataset
+df
+
+## Pre-Processing Data
+
+# Counts the number of characters in the SMILES column and creates a column for the number of characters
+df['number of characters'] = df['SMILES'].apply(lambda x: len(x))
+
+# Dropping the same table in the dataset
+df.drop_duplicates(subset = ['SMILES'], inplace=True)
+
+# Returns characters less than equal to 100 in the SMILES column
+df_cell = df[df['number of characters']<=100]
+df_cell
+
+print(df_cell['Toxic_nonToxic'].value_counts())
+
+# melihat statistik deskriptif
+df_cell.describe()
+
+# Displays the number of characters and Longest SMILES in the dataset
+charset = set("".join(list(df_cell.SMILES))+"!E")
+char_to_int = dict((c,i) for i,c in enumerate(charset))
+int_to_char = dict((i,c) for i,c in enumerate(charset))
+embed = max([len(smile) for smile in df_cell.SMILES]) + 5
+print (str(charset))
+print(len(charset), embed)
+
+# Numbering the characters in SMILES
+char_to_int
+
+X = df_cell['SMILES']
+y = df_cell['Toxic_nonToxic']
+
+ros = RandomOverSampler(random_state=42)
+
+X_resampled, y_resampled = ros.fit_resample(X.values.reshape(-1, 1), y)
+
+df_resampled = pd.DataFrame({'SMILES': X_resampled.flatten(), 'Toxic_nonToxic': y_resampled})
+
+df_resampled['Toxic_nonToxic'].value_counts()
+
+df_resampled
+
+# Define X and y for the resampled dataset
+X_resampled = df_resampled['SMILES']
+y_resampled = df_resampled['Toxic_nonToxic']
+
+# Split the resampled dataset into train and test sets
+X_train_resampled, X_test_resampled, y_train_resampled, y_test_resampled = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+
+def vectorize(SMILES):
+        one_hot =  np.zeros((SMILES.shape[0], embed , len(charset)),dtype=np.int8)
+        for i,smile in enumerate(SMILES):
+            #encode the startchar
+            one_hot[i,0,char_to_int["!"]] = 1
+            #encode the rest of the chars
+            for j,c in enumerate(smile):
+                one_hot[i,j+1,char_to_int[c]] = 1
+            #Encode endchar
+            one_hot[i,len(smile)+1:,char_to_int["E"]] = 1
+        #Return two, one for input and the other for output
+        return one_hot[:,0:-1,:], one_hot[:,1:,:]
+
+X_train_vec, _ = vectorize(X_train_resampled)
+X_test_vec, _  = vectorize(X_test_resampled)
+
+# Convert y_train_resampled and y_test_resampled to numpy arrays
+y_train_numpy = y_train_resampled.values.astype(np.int8)
+y_test_numpy = y_test_resampled.values.astype(np.int8)
+
+y_train_numpy
+
+vocab_size=len(charset)
+
+vocab_size
+
+X_train_vec
+
+X_test_vec
+
+# Hyperparameter
+
+def get_hyperparameter(x):
+
+    hidden_layers = int(1 + (x[0] * 2))
+    node_hidden_layer1 = int(32 + (x[1] * 256))
+    node_hidden_layer2 = int(32 + (x[2] * 256))
+    node_hidden_layer3 = int(32 + (x[3] * 256))
+
+    node_num = [node_hidden_layer1, node_hidden_layer2, node_hidden_layer3]
+
+    activation = ['tanh','relu','sigmoid']
+    activations = activation[int(x[4] * 2)]
+
+    optimizer = ['Adam','SGD','RMSprop']
+    optimizers = optimizer[int(x[5] * 2)]
+
+    params = {
+        'hidden_layers'   : hidden_layers,
+        'node_num'        : node_num,
+        'activation'      : activations,
+        'optimizer'       : optimizers
+    }
+    return params
+
+def get_classifier(x):
+    params = get_hyperparameter(x)
+    return get_model(params)
+
+# LSTM + GWO
+
+SEED = 123
+
+def set_seeds (seed=SEED):
+    os.environ['PYTHONHASHSEED']=str(seed)
+    random.seed(seed)
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
+
+def get_model(params):
+    print(params)
+    set_seeds()
+    model = Sequential()
+    model.add(Embedding(vocab_size, 100, input_length=embed-1))
+    model.add(InputLayer(input_shape=(X_train_vec.shape[1], X_train_vec.shape[2])))
+    for i in range(params['hidden_layers']):
+        if i == 0 and params['hidden_layers'] == 1:
+            model.add(LSTM(params['node_num'][i], activation=params['activation']))
+        elif i == 0 and params['hidden_layers'] == 2:
+            model.add(LSTM(params['node_num'][i], return_sequences=True, activation=params['activation']))
+        elif i == 1 and params['hidden_layers'] == 2:
+            model.add(LSTM(params['node_num'][i], activation=params['activation']))
+        elif i == 0 and params['hidden_layers'] == 3:
+            model.add(LSTM(params['node_num'][i], return_sequences=True, activation=params['activation']))
+        elif i == 1 and params['hidden_layers'] == 3:
+            model.add(LSTM(params['node_num'][i], return_sequences=True, activation=params['activation']))
+        elif i == 2 and params['hidden_layers'] == 3:
+            model.add(LSTM(params['node_num'][i], activation=params['activation']))
+    model.add(BatchNormalization())
+    model.add(Flatten())
+    model.add(Dense(100, activation=params['activation']))
+    model.add(Dense(1, activation='sigmoid'))
+    if params['optimizer'] == 'SGD':
+        optimizer = SGD
+    elif params['optimizer'] == 'RMSprop':
+        optimizer = RMSprop
+    elif params['optimizer'] == 'Adam':
+        optimizer = Adam
+    model.compile(optimizer=optimizer(learning_rate=0.0001),
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'])
+    return model
+
+class LSTMHyperOpti(Problem):
+  def __init__(self, X_train_vec, y_train_numpy):
+      super().__init__(dimension=6, lower=0, upper=1 )
+      self.X_train_vec = X_train_vec
+      self.y_train_numpy = y_train_numpy
+  def _evaluate(self, x):
+      model = get_classifier(x)
+      early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+      history = model.fit(x=np.argmax(self.X_train_vec, axis=2), y=self.y_train_numpy,
+                          batch_size=64, epochs=50, validation_split=0.3,
+                          callbacks=[early_stopping], verbose=1)
+      return history.history['val_loss'][-1]
+
+# Train LSTM + GWO
+
+problem = LSTMHyperOpti(X_train_vec, y_train_numpy)
+task = Task(problem, max_iters=15, optimization_type = OptimizationType.MINIMIZATION)
+algorithm = GreyWolfOptimizer(population_size=13)
+start_time = time.time()
+best_params, best_accuracy = algorithm.run(task)
+end_time = time.time()
+runtime = end_time - start_time
+print("Runtime: ", runtime, "detik")
+print("Number of iterations: ",task.iters)
+print('Best_parameters: ', get_hyperparameter(best_params))
+convergen_data= task.convergence_data()
+
+print(convergen_data)
+
+task.plot_convergence()
+
+best_parameters = get_classifier(best_params)
+
+load_model = get_classifier(best_params)
+load_model.summary()
+
+# CONVERGENCE
+
+# Get the best LSTM model
+best_lstm_model = best_parameters
+
+# Define Early Stopping callback
+early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+# Train the best LSTM model
+history_train = best_lstm_model.fit(x=np.argmax(X_train_vec, axis=2), y=y_train_numpy,
+                          batch_size=64, epochs=50, validation_split=0.3,
+                          callbacks=[early_stopping], verbose=1)
+
+eval_test = best_lstm_model.evaluate(x=np.argmax(X_test_vec, axis=2), y=y_test_numpy, verbose=1)
+print(f'Best model test_accuracy:, {eval_test[1]:.4f}')
+print(f'Best model test_loss    :, {eval_test[0]:.4f}')
+
+eval_train = best_lstm_model.evaluate(x=np.argmax(X_train_vec, axis=2), y=y_train_numpy, verbose=1)
+print(f'Best model train_accuracy:, {eval_train[1]:.4f}')
+print(f'Best model train_loss    :, {eval_train[0]:.4f}')
+
+# Graph Section
+
+!pip install --upgrade seaborn
+
+!pip install scikit-learn --upgrade scikit-learn
+
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+# Ambil data hasil pelatihan dari objek history_train
+train_accuracy = history_train.history['accuracy']
+val_accuracy = history_train.history['val_accuracy']
+train_loss = history_train.history['loss']
+val_loss = history_train.history['val_loss']
+
+# Jumlah epoch
+epochs = range(1, len(train_accuracy) + 1)
+
+# Plotting training dan validation accuracy
+plt.figure(figsize=(8, 3))
+plt.plot(epochs, train_accuracy, 'b', label='Training Accuracy')
+plt.plot(epochs, val_accuracy, 'r', label='Validation Accuracy')
+#plt.axhline(y=eval_test[1], color='g', linestyle='--', label='Testing Accuracy')
+
+plt.title('Training, Validation, and Testing Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid()
+plt.show()
+
+# Jumlah epoch
+epochs = range(1, len(train_accuracy) + 1)
+
+# Plotting loss
+plt.figure(figsize=(8, 3))
+plt.plot(epochs, train_loss, 'b', label='Training Loss')
+plt.plot(epochs, val_loss, 'r', label='Validation Loss')
+#plt.axhline(y=eval_test[0], color='g', linestyle='--', label='Testing Loss')
+plt.title('Training, Validation, and Testing Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid()
+plt.show()
+
+# Predict the test set results
+y_test_pred_prob = best_lstm_model.predict(np.argmax(X_test_vec, axis=2))
+y_test_pred = (y_test_pred_prob > 0.5).astype(int)
+
+test_conf_matrix = confusion_matrix(y_test_numpy, y_test_pred)
+
+# Menampilkan confusion matrix - Testing
+plt.figure(figsize=(8, 6))
+sns.heatmap(test_conf_matrix, annot=True, fmt='d', cmap='Blues')
+plt.title('Confusion Matrix - Testing')
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.show()
+
+test_accuracy = accuracy_score(y_test_numpy, y_test_pred)
+test_precision = precision_score(y_test_numpy, y_test_pred)
+test_recall = recall_score(y_test_numpy, y_test_pred)
+test_f1 = f1_score(y_test_numpy, y_test_pred)
+
+# Menampilkan hasil Testing
+print("Confusion Matrix - Testing:")
+print(test_conf_matrix)
+print(f"Accuracy Score  - Testing: {test_accuracy:.4f}")
+print(f"Precision Score - Testing: {test_precision:.4f}")
+print(f"Recall Score    - Testing: {test_recall:.4f}")
+print(f"F1 Score        - Testing: {test_f1:.4f}")
+
+# Predict the training set results
+y_train_pred_prob = best_lstm_model.predict(np.argmax(X_train_vec, axis=2))
+y_train_pred = (y_train_pred_prob > 0.5).astype(int)
+
+train_conf_matrix = confusion_matrix(y_train_numpy, y_train_pred)
+
+# Menampilkan confusion matrix - Training
+plt.figure(figsize=(8, 6))
+sns.heatmap(train_conf_matrix, annot=True, fmt='d', cmap='Blues')
+plt.title('Confusion Matrix - Training')
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.show()
+
+train_accuracy = accuracy_score(y_train_numpy, y_train_pred)
+train_precision = precision_score(y_train_numpy, y_train_pred)
+train_recall = recall_score(y_train_numpy, y_train_pred)
+train_f1 = f1_score(y_train_numpy, y_train_pred)
+
+# Menampilkan hasil Training
+print("Confusion Matrix - Training:")
+print(train_conf_matrix)
+print(f"Accuracy Score  - Training: {train_accuracy:.4f}")
+print(f"Precision Score - Training: {train_precision:.4f}")
+print(f"Recall Score    - Training: {train_recall:.4f}")
+print(f"F1 Score        - Training: {train_f1:.4f}")
+
+# Save and Load
+
+L_DC=joblib.load('convergen_data_JN_10.joblib')
+
+S_DC=joblib.dump(L_DC, 'convergen_data_JN_13.joblib')
+
+from tensorflow.keras.models import save_model, load_model
+
+# Save best_lstm_model_JN_10
+save = save_model(best_lstm_model, 'best_lstm_model_JN_13')
+
+loaded_model = load_model('best_lstm_model_JN_13')
+
+loaded_model.summary()
+
+print(L_DC)
+
+# Buat variabel x dan y
+X_pop_13, y_pop_13 = L_DC # nilai-nilai dari task.convergence_data()
+
+# Buat diagram garis
+plt.plot(X_pop_13, y_pop_13, label='pop_13', marker='o')
+
+# Customize the plot
+plt.title('Convergence Plot of Population Size 13')
+plt.xlabel('Iteration')
+plt.ylabel('Convergence Value')
+plt.legend()
+plt.grid(True)
+plt.savefig('Convergence Data of Population Size 13.png')
+plt.show()
